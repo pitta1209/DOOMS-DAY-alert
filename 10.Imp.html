@@ -1,0 +1,354 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>SFU Canvas Dashboard</title>
+<style>
+body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: #f4f4f9; margin:0; padding:20px; }
+h1 { color:#b71c1c; }
+button { cursor:pointer; border:none; border-radius:6px; padding:8px 12px; background:#b71c1c; color:#fff; transition:0.2s; }
+button:hover { background:#d32f2f; }
+select { border-radius:6px; border:1px solid #b71c1c; padding:5px; }
+
+/* Setup Page */
+#setupPage { max-width: 400px; margin: 50px auto; padding:20px; background:#fff; border-radius:10px; box-shadow:0 5px 15px rgba(0,0,0,0.1);}
+#setupPage input { width:100%; padding:8px; margin:8px 0; border-radius:6px; border:1px solid #ccc; }
+.hidden { display:none; }
+.error-message { color:#b71c1c; margin:10px 0; }
+.success-message { color:#2e7d32; margin:10px 0; }
+
+/* Dashboard */
+#dashboardPage { max-width:1000px; margin:auto; }
+.filters { display:flex; flex-wrap:wrap; gap:10px; margin:15px 0; }
+#stats { margin-bottom:15px; font-weight:bold; }
+
+/* Assignment Cards */
+.assignment-card { 
+  border-left:6px solid #b71c1c; background:#fff; border-radius:8px; padding:10px 15px; margin:6px 0; 
+  box-shadow:0 3px 6px rgba(0,0,0,0.1); transition: transform 0.15s, box-shadow 0.15s;
+}
+.assignment-card:hover { transform: translateY(-3px); box-shadow:0 6px 12px rgba(0,0,0,0.15);}
+.assignment-card.passed { border-left:6px solid #999; color:#555; }
+.assignment-type { font-weight:bold; }
+.assignment-type.quiz { color:#d32f2f; }
+.assignment-type.exam { color:#b71c1c; }
+.assignment-type.assignment { color:#c62828; }
+a { color:#b71c1c; text-decoration:none; }
+a:hover { text-decoration:underline; }
+
+/* Calendar Styles */
+#calendarContainer { max-width:1000px; margin:auto; }
+.calendar-header { display:flex; justify-content:space-between; align-items:center; margin-bottom:10px; color:#b71c1c; }
+#calendarGrid { display:grid; grid-template-columns:repeat(7,1fr); gap:5px; }
+.calendar-cell { min-height:80px; background:#fff; border-radius:6px; padding:5px; box-shadow:0 2px 5px rgba(0,0,0,0.1); position:relative; }
+.calendar-cell.today { border:2px solid #d32f2f; }
+</style>
+</head>
+<body>
+
+<div id="setupPage">
+<h1>🎓 SFU Canvas Dashboard Setup</h1>
+<form id="setupForm">
+  <label>Canvas URL:</label>
+  <input type="text" class="canvasUrl" value="https://canvas.instructure.com" required>
+  <label>API Token:</label>
+  <input type="password" class="canvasToken" placeholder="Your API token" required>
+  <br><br>
+  <button type="submit">Connect</button>
+</form>
+<div id="errorMessage" class="error-message hidden"></div>
+<div id="successMessage" class="success-message hidden"></div>
+<p style="color:#b71c1c; cursor:pointer; font-weight:bold;" onclick="addAccountForm()">+ Add Another Account</p>
+</div>
+
+<div id="dashboardPage" class="hidden">
+<h1>📚 SFU Canvas Dashboard</h1>
+<div class="filters">
+<select id="typeFilter">
+  <option value="all">All Types</option>
+  <option value="assignment">Assignments</option>
+  <option value="quiz">Quizzes</option>
+  <option value="exam">Exams</option>
+</select>
+<!-- Course filter dynamically inserted -->
+<select id="statusFilter">
+  <option value="all">All Status</option>
+  <option value="upcoming">Upcoming</option>
+  <option value="soon">Due Soon</option>
+  <option value="passed">Passed</option>
+</select>
+<button onclick="refreshData()">🔄 Refresh</button>
+<button onclick="toggleCalendar()">📅 Calendar Mode</button>
+<button onclick="showSetup()">⚙️ Settings</button>
+</div>
+<div id="stats"></div>
+<div id="assignmentsGrid"></div>
+<div id="calendarContainer" class="hidden">
+  <div class="calendar-header">
+    <button onclick="prevMonth()">◀</button>
+    <span id="currentMonth"></span>
+    <button onclick="nextMonth()">▶</button>
+  </div>
+  <div id="calendarGrid"></div>
+</div>
+</div>
+
+<script>
+let accounts = [];
+let assignmentsData = [];
+let calendarMode = false;
+let currentDate = new Date();
+
+function addAccountForm(){
+  const setup = document.getElementById('setupPage');
+  const form = document.createElement('form');
+  form.className = "accountForm";
+  form.innerHTML=`
+    <label>Canvas URL:</label>
+    <input type="text" class="canvasUrl" value="https://canvas.instructure.com" required>
+    <label>API Token:</label>
+    <input type="password" class="canvasToken" placeholder="Your API token" required>
+    <br><br>
+    <button type="submit">Connect</button>
+  `;
+  setup.appendChild(form);
+  form.addEventListener('submit', handleSetupSubmit);
+}
+
+async function handleSetupSubmit(e){
+  e.preventDefault();
+
+  const url = e.target.querySelector('.canvasUrl').value.trim().replace(/\/$/,'');
+  const token = e.target.querySelector('.canvasToken').value.trim();
+
+  // 🔹 입력값 검증
+  if(!url || !token) {
+    showError("Invalid input: API URL and Token are required.");
+    return;
+  }
+
+  hideMessages(); // 이전 메시지 숨기기
+
+  try {
+    // 🔹 Canvas API 테스트 호출 (계정 유효성 확인)
+    const courses = await makeCanvasRequest(url, token, '/api/v1/courses?enrollment_state=active&per_page=1');
+
+    // 🔹 과목 없으면
+    if(!Array.isArray(courses) || courses.length === 0){
+      showError("Invalid input: no courses found. Check your API token or URL.");
+      return;
+    }
+
+    // 🔹 모든 검증 통과 시 계정 추가
+    accounts.push({url, token});
+    showSuccess("Account added successfully!");
+    document.getElementById('setupPage').classList.add('hidden');
+    document.getElementById('dashboardPage').classList.remove('hidden');
+
+    // 🔹 과제 불러오기
+    fetchAssignments();
+
+  } catch(err) {
+    console.error(err);
+    showError("Invalid input: cannot connect to Canvas. Check your API URL or Token.");
+  }
+}
+
+
+document.getElementById('setupForm').addEventListener('submit', handleSetupSubmit);
+
+function showSetup(){ document.getElementById('dashboardPage').classList.add('hidden'); document.getElementById('setupPage').classList.remove('hidden'); }
+function showError(msg){ const div=document.getElementById('errorMessage'); div.textContent=msg; div.classList.remove('hidden'); }
+function showSuccess(msg){ const div=document.getElementById('successMessage'); div.textContent=msg; div.classList.remove('hidden'); }
+function hideMessages(){ document.getElementById('errorMessage').classList.add('hidden'); document.getElementById('successMessage').classList.add('hidden'); }
+
+async function makeCanvasRequest(url, token, endpoint){
+  const fullUrl = url+endpoint;
+  const proxyUrl = 'https://corsproxy.io/?'+encodeURIComponent(fullUrl);
+  const res = await fetch(proxyUrl,{ headers:{ 'Authorization': `Bearer ${token}`, 'Accept':'application/json' }});
+  if(!res.ok) throw new Error(`HTTP ${res.status}`);
+  return await res.json();
+}
+
+function determineAssignmentType(a){
+  if(a.is_quiz_assignment) return 'quiz';
+  const name=a.name.toLowerCase();
+  if(name.includes('exam')||name.includes('test')||name.includes('midterm')||name.includes('final')) return 'exam';
+  return 'assignment';
+}
+
+let nearestDueDate = null; // 모든 과제 중 가장 가까운 due date 저장 (전역)
+
+async function fetchAssignments(){
+  assignmentsData=[];
+  nearestDueDate = null; // 초기화
+  document.getElementById('assignmentsGrid').innerHTML="<p>Loading assignments...</p>";
+  try{
+    let allCourses = new Set();
+    const now = new Date();
+
+    for(const acc of accounts){
+      const courses = await makeCanvasRequest(acc.url, acc.token, '/api/v1/courses?enrollment_state=active&per_page=100');
+      for(const course of courses){
+        if(!course.id) continue;
+        allCourses.add(course.course_code||course.name);
+        const assignments = await makeCanvasRequest(acc.url, acc.token, `/api/v1/courses/${course.id}/assignments?per_page=100`);
+        const courseName = course.course_code||course.name;
+        for(const a of assignments){
+          if(!a.due_at) continue;
+
+          const dueDateObj = new Date(a.due_at);
+          // 🔹 전역 최근 due date 갱신
+          if(dueDateObj > now && (!nearestDueDate || dueDateObj < nearestDueDate)){
+            nearestDueDate = dueDateObj;
+          }
+
+          assignmentsData.push({
+            id:a.id, title:a.name, course:courseName,
+            type:determineAssignmentType(a), dueDate:a.due_at,
+            points:a.points_possible||0, url:a.html_url,
+            passed:a.submission && (a.submission.workflow_state==='submitted'||a.submission.workflow_state==='graded')
+          });
+        }
+      }
+    }
+
+    populateCourseFilter([...allCourses]);
+    renderDashboard();
+
+    console.log("Nearest due date:", nearestDueDate); // 확인용
+  }catch(err){ 
+    showError("Failed to load assignments: "+err.message); 
+    document.getElementById('assignmentsGrid').innerHTML=""; 
+  }
+}
+
+
+function getDueStatus(a){
+  if(a.passed) return 'passed';
+  const diff=(new Date(a.dueDate)-new Date())/(1000*60*60*24);
+  if(diff<0) return 'passed';
+  if(diff<=3) return 'soon';
+  return 'upcoming';
+}
+
+function formatDueDate(due){ return new Date(due).toLocaleString('en-US',{month:'short',day:'numeric',hour:'numeric',minute:'2-digit'}); }
+
+function renderStats(filtered){
+  const total = filtered.length;
+  const passed = filtered.filter(a=>getDueStatus(a)==='passed').length;
+  const soon = filtered.filter(a=>getDueStatus(a)==='soon').length;
+  const upcoming = filtered.filter(a=>getDueStatus(a)==='upcoming').length;
+  document.getElementById('stats').innerHTML=`Total: ${total} | Passed: ${passed} | Due Soon: ${soon} | Upcoming: ${upcoming}`;
+}
+
+function renderAssignments(filtered){
+  const grid=document.getElementById('assignmentsGrid');
+  if(!filtered.length) return grid.innerHTML="<p>No assignments match filters.</p>";
+  filtered.sort((a,b)=>new Date(a.dueDate)-new Date(b.dueDate));
+  if(calendarMode){ renderCalendar(filtered); }
+  else{
+    grid.innerHTML=filtered.map(a=>`<div class="assignment-card ${getDueStatus(a)} ${a.passed?'passed':''}"><strong>${a.title}</strong> (${a.type})<br>Course: ${a.course}<br>Due: ${formatDueDate(a.dueDate)}<br>Points: ${a.points} | <a href="${a.url}" target="_blank">View</a></div>`).join('');
+  }
+}
+
+function renderDashboard(){
+  const type = document.getElementById('typeFilter').value;
+  const status = document.getElementById('statusFilter').value;
+  const courseFilter = document.getElementById('courseFilter') ? document.getElementById('courseFilter').value : 'all';
+  let filtered = assignmentsData;
+
+  // 타입 필터
+  if(type !== 'all') filtered = filtered.filter(a => a.type === type);
+
+  // 코스 필터
+  if(courseFilter !== 'all') filtered = filtered.filter(a => a.course === courseFilter);
+
+  // 상태 필터
+  if(status !== 'all') {
+    const now = new Date();
+    if(status === 'soon') {
+      // 3일 이내 과제
+      const soonAssignments = filtered.filter(a => {
+        const diff = new Date(a.dueDate) - now;
+        return diff > 0 && diff <= 3*24*60*60*1000;
+      });
+      if(soonAssignments.length > 0){
+        // 가장 가까운 날짜
+        soonAssignments.sort((a,b)=>new Date(a.dueDate)-new Date(b.dueDate));
+        const closestDate = new Date(soonAssignments[0].dueDate).toDateString();
+        filtered = soonAssignments.filter(a => new Date(a.dueDate).toDateString() === closestDate);
+      } else filtered = [];
+    } else if(status === 'upcoming') {
+      // 3일 이후 예정 과제
+      filtered = filtered.filter(a => new Date(a.dueDate) - now > 0);
+    } else if(status === 'passed') {
+      filtered = filtered.filter(a => a.passed);
+    }
+  }
+
+  renderStats(filtered);
+  renderAssignments(filtered);
+}
+
+// 계정 전체 코스 필터 생성
+function populateCourseFilter(courseList) {
+  const container = document.querySelector('.filters');
+  if(document.getElementById('courseFilter')) return; // 이미 생성됐으면 return
+  const select = document.createElement('select');
+  select.id = 'courseFilter';
+  select.innerHTML = `<option value="all">All Courses</option>`;
+  courseList.sort().forEach(c => {
+    const opt = document.createElement('option');
+    opt.value = c;
+    opt.textContent = c;
+    select.appendChild(opt);
+  });
+  container.insertBefore(select, container.children[1]); // 타입 필터 뒤에 추가
+  select.addEventListener('change', renderDashboard);
+}
+
+function refreshData(){ fetchAssignments(); }
+function toggleCalendar(){
+  calendarMode = !calendarMode;
+  document.getElementById('assignmentsGrid').classList.toggle('hidden', calendarMode);
+  document.getElementById('calendarContainer').classList.toggle('hidden', !calendarMode);
+  if(calendarMode) renderCalendar(assignmentsData); else renderDashboard();
+}
+
+function prevMonth(){ currentDate.setMonth(currentDate.getMonth()-1); renderCalendar(assignmentsData); }
+function nextMonth(){ currentDate.setMonth(currentDate.getMonth()+1); renderCalendar(assignmentsData); }
+
+function renderCalendar(filtered){
+  filtered = filtered || assignmentsData;
+  const month=currentDate.getMonth(), year=currentDate.getFullYear();
+  const firstDay=new Date(year,month,1).getDay();
+  const lastDate=new Date(year,month+1,0).getDate();
+  document.getElementById('currentMonth').textContent=currentDate.toLocaleString('en-US',{month:'long',year:'numeric'});
+  const grid=document.getElementById('calendarGrid');
+  grid.innerHTML='';
+  for(let i=0;i<firstDay;i++) grid.appendChild(document.createElement('div'));
+  for(let d=1;d<=lastDate;d++){
+    const cell=document.createElement('div');
+    cell.className='calendar-cell';
+    const today = new Date();
+    if(d===today.getDate() && month===today.getMonth() && year===today.getFullYear()) cell.classList.add('today');
+    const dateStr = new Date(year,month,d).toDateString();
+    cell.innerHTML=`<div style="position:absolute;top:5px;right:5px;font-size:0.8em;color:#b71c1c;">${d}</div>`;
+    filtered.filter(a=>new Date(a.dueDate).toDateString()===dateStr).forEach(a=>{
+      const card=document.createElement('div');
+      card.className=`assignment-card ${getDueStatus(a)} ${a.passed?'passed':''}`;
+      card.style.marginTop='18px';
+      card.innerHTML=`<strong>${a.title}</strong> (${a.type})<br>${a.course}<br>Points: ${a.points}`;
+      cell.appendChild(card);
+    });
+    grid.appendChild(cell);
+  }
+}
+
+document.getElementById('typeFilter').addEventListener('change', renderDashboard);
+document.getElementById('statusFilter').addEventListener('change', renderDashboard);
+
+</script>
+</body>
+</html>
